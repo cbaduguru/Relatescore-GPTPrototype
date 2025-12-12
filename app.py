@@ -3,20 +3,10 @@ import os
 import re
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Tuple
-from io import BytesIO
 
 import numpy as np
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
-
-# Optional (PNG export)
-try:
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import Wedge, Circle
-    MATPLOTLIB_OK = True
-except Exception:
-    MATPLOTLIB_OK = False
 
 APP_NAME = "RelateScore™ Prototype"
 MISSION = "RelateScore™ provides private relational clarity that supports growth without judgment or exposure."
@@ -201,9 +191,6 @@ def ema(values: List[float], alpha: float) -> float:
 
 
 def compute_dashboard(reflections: List[Dict[str, Any]], ema_alpha: float) -> Dict[str, Any]:
-    """Aggregates for RGI and category scores with outlier dampening + EMA across time.
-       Backward compatible: reads r['rgi'] else r['rsq'].
-    """
     if not reflections:
         return {
             "rgi_point": 0.0,
@@ -234,7 +221,7 @@ def compute_dashboard(reflections: List[Dict[str, Any]], ema_alpha: float) -> Di
 
 
 # -----------------------------
-# UI / Branding
+# Branding / CSS
 # -----------------------------
 def inject_branding():
     st.set_page_config(page_title=APP_NAME, page_icon="🧭", layout="wide")
@@ -249,7 +236,6 @@ def inject_branding():
           --rs-muted:#475569;
           --rs-border:#E2E8F0;
 
-          /* Ring theming */
           --ring-bg: rgba(59,130,246,0.20);
           --ring-text: #0F172A;
           --ring-subtext: #475569;
@@ -276,7 +262,6 @@ def inject_branding():
         .rs-card{background:var(--ring-card); padding:16px; border-radius:18px; border:1px solid var(--rs-border);}
         .rs-footer{color:var(--rs-muted); font-size:12px; padding-top:20px;}
 
-        /* Ring animation */
         @keyframes rsRingFill {
           from { stroke-dashoffset: var(--dashoffset-from); }
           to   { stroke-dashoffset: var(--dashoffset-to); }
@@ -298,7 +283,7 @@ def footer():
 
 
 # -----------------------------
-# Ring: color bands + SVG + exports + clipboard
+# Ring: color bands + animated SVG + tooltip + dark mode
 # -----------------------------
 def _interp_hex(c1: str, c2: str, t: float) -> str:
     t = float(np.clip(t, 0, 1))
@@ -312,7 +297,6 @@ def _interp_hex(c1: str, c2: str, t: float) -> str:
 
 
 def rgi_color_growth_band(v: float) -> str:
-    """Non-judgmental growth palette: slate -> blue -> indigo."""
     v = float(np.clip(v, 0, 100))
     low  = ("#64748B", 0)    # slate
     mid  = ("#3B82F6", 55)   # blue
@@ -325,7 +309,6 @@ def rgi_color_growth_band(v: float) -> str:
 
 
 def render_rgi_progress_ring(rgi_value: float) -> str:
-    """In-app: animated ring + tooltip + dark-mode adaptive center text via CSS vars."""
     v = float(np.clip(rgi_value, 0, 100))
     size = 240
     stroke = 18
@@ -334,7 +317,6 @@ def render_rgi_progress_ring(rgi_value: float) -> str:
 
     circumference = 2 * np.pi * radius
     progress = (v / 100.0) * circumference
-
     dashoffset_from = circumference
     dashoffset_to = max(0.0, circumference - progress)
 
@@ -350,9 +332,7 @@ def render_rgi_progress_ring(rgi_value: float) -> str:
       <div style="position:relative; width:{size}px; height:{size}px; margin:0 auto;">
         <svg width="{size}" height="{size}" viewBox="0 0 {size} {size}" style="position:absolute; top:0; left:0;">
           <title>{tooltip}</title>
-
           <circle cx="{cx}" cy="{cy}" r="{radius}" fill="none" stroke="var(--ring-bg)" stroke-width="{stroke}"/>
-
           <circle
             cx="{cx}" cy="{cy}" r="{radius}"
             fill="none"
@@ -389,155 +369,6 @@ def render_rgi_progress_ring(rgi_value: float) -> str:
     """
 
 
-def build_rgi_ring_svg(rgi_value: float, size_px: int = 512) -> str:
-    """Deck-ready SVG (solid white text color optimized for light decks)."""
-    v = float(np.clip(rgi_value, 0, 100))
-    size = int(size_px)
-    stroke = max(12, int(size * 0.075))
-    radius = (size - stroke) / 2
-    cx = cy = size / 2
-
-    circumference = 2 * np.pi * radius
-    progress = (v / 100.0) * circumference
-    dashoffset = max(0.0, circumference - progress)
-
-    ring_color = rgi_color_growth_band(v)
-    tooltip = (
-        f"RGI (Relationship Growth Index): {int(v)}/100. "
-        "A private, time-weighted growth signal based on structured reflection. "
-        "Non-diagnostic; designed to support clarity without judgment or exposure."
-    )
-
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 {size} {size}">
-  <title>{tooltip}</title>
-  <circle cx="{cx}" cy="{cy}" r="{radius}" fill="none" stroke="rgba(59,130,246,0.20)" stroke-width="{stroke}"/>
-  <circle cx="{cx}" cy="{cy}" r="{radius}" fill="none" stroke="{ring_color}" stroke-width="{stroke}"
-          stroke-linecap="round"
-          stroke-dasharray="{circumference:.2f}"
-          stroke-dashoffset="{dashoffset:.2f}"
-          transform="rotate(-90 {cx} {cy})"/>
-  <text x="{cx}" y="{cy - size*0.05}" text-anchor="middle" font-family="sans-serif" font-size="{int(size*0.12)}" font-weight="800" fill="{ring_color}">RGI</text>
-  <text x="{cx}" y="{cy + size*0.23}" text-anchor="middle" font-family="sans-serif" font-size="{int(size*0.27)}" font-weight="900" fill="#0F172A">{int(v)}</text>
-</svg>"""
-
-
-def build_rgi_ring_svg_transparent(rgi_value: float, size_px: int = 512) -> str:
-    """Transparent-background SVG (deck-safe)."""
-    v = float(np.clip(rgi_value, 0, 100))
-    size = int(size_px)
-    stroke = max(12, int(size * 0.075))
-    radius = (size - stroke) / 2
-    cx = cy = size / 2
-
-    circumference = 2 * np.pi * radius
-    progress = (v / 100.0) * circumference
-    dashoffset = max(0.0, circumference - progress)
-
-    ring_color = rgi_color_growth_band(v)
-    tooltip = (
-        f"RGI (Relationship Growth Index): {int(v)}/100. "
-        "A private, time-weighted growth signal based on structured reflection."
-    )
-
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 {size} {size}">
-  <title>{tooltip}</title>
-  <circle cx="{cx}" cy="{cy}" r="{radius}" fill="none" stroke="rgba(59,130,246,0.20)" stroke-width="{stroke}"/>
-  <circle cx="{cx}" cy="{cy}" r="{radius}" fill="none" stroke="{ring_color}" stroke-width="{stroke}"
-          stroke-linecap="round"
-          stroke-dasharray="{circumference:.2f}"
-          stroke-dashoffset="{dashoffset:.2f}"
-          transform="rotate(-90 {cx} {cy})"/>
-  <text x="{cx}" y="{cy - size*0.05}" text-anchor="middle" font-family="sans-serif" font-size="{int(size*0.12)}" font-weight="800" fill="{ring_color}">RGI</text>
-  <text x="{cx}" y="{cy + size*0.23}" text-anchor="middle" font-family="sans-serif" font-size="{int(size*0.27)}" font-weight="900" fill="#0F172A">{int(v)}</text>
-</svg>"""
-
-
-def build_rgi_ring_png_bytes(rgi_value: float, size_px: int = 512, transparent: bool = True) -> bytes:
-    """Server-side PNG export using matplotlib."""
-    if not MATPLOTLIB_OK:
-        raise RuntimeError("matplotlib not available")
-
-    v = float(np.clip(rgi_value, 0, 100))
-    ring_color = rgi_color_growth_band(v)
-
-    dpi = 256
-    fig_inches = max(2.0, int(size_px) / dpi)
-
-    fig, ax = plt.subplots(figsize=(fig_inches, fig_inches), dpi=dpi)
-    ax.set_aspect("equal")
-    ax.axis("off")
-
-    if not transparent:
-        ax.add_patch(Circle((0, 0), 1.08, color="white"))
-
-    outer_r = 1.0
-    width = 0.18
-
-    bg = Wedge((0, 0), outer_r, 0, 360, width=width)
-    bg.set_facecolor((59/255, 130/255, 246/255, 0.20))
-    bg.set_edgecolor("none")
-    ax.add_patch(bg)
-
-    start = 90
-    sweep = 360 * (v / 100.0)
-    fg = Wedge((0, 0), outer_r, start - sweep, start, width=width)
-    fg.set_facecolor(ring_color)
-    fg.set_edgecolor("none")
-    ax.add_patch(fg)
-
-    ax.text(0, 0.18, "RGI", ha="center", va="center", fontsize=16, fontweight="bold", color=ring_color)
-    ax.text(0, -0.10, f"{int(v)}", ha="center", va="center", fontsize=34, fontweight="heavy", color="#0F172A")
-
-    ax.set_xlim(-1.2, 1.2)
-    ax.set_ylim(-1.2, 1.2)
-
-    buf = BytesIO()
-    fig.savefig(buf, format="png", transparent=transparent, bbox_inches="tight", pad_inches=0.05)
-    plt.close(fig)
-    buf.seek(0)
-    return buf.read()
-
-
-def copy_svg_to_clipboard_ui(svg_text: str, height: int = 130):
-    """Text area + copy button using a small HTML/JS component."""
-    st.text_area("SVG (editable)", value=svg_text, height=height)
-
-    escaped = (
-        svg_text.replace("\\", "\\\\")
-        .replace("`", "\\`")
-        .replace("${", "\\${")
-    )
-
-    components.html(
-        f"""
-        <div style="display:flex; gap:10px; align-items:center;">
-          <button id="copyBtn" style="
-            padding:8px 12px; border-radius:10px; border:1px solid #E2E8F0;
-            background:#FFFFFF; cursor:pointer; font-weight:600;">
-            Copy SVG to clipboard
-          </button>
-          <span id="copyStatus" style="font-family:sans-serif; color:#475569; font-size:13px;"></span>
-        </div>
-        <script>
-          const svgText = `{escaped}`;
-          const btn = document.getElementById("copyBtn");
-          const status = document.getElementById("copyStatus");
-          btn.addEventListener("click", async () => {{
-            try {{
-              await navigator.clipboard.writeText(svgText);
-              status.textContent = "Copied.";
-              setTimeout(() => status.textContent = "", 1500);
-            }} catch (e) {{
-              status.textContent = "Copy failed (browser permissions).";
-              setTimeout(() => status.textContent = "", 2500);
-            }}
-          }});
-        </script>
-        """,
-        height=48,
-    )
-
-
 # -----------------------------
 # Views
 # -----------------------------
@@ -547,7 +378,10 @@ def view_home(store: Dict[str, Any]):
     col1, col2 = st.columns([0.75, 0.25], vertical_alignment="center")
     with col1:
         st.markdown(f"<div class='rs-title'>{APP_NAME}</div>", unsafe_allow_html=True)
-        st.markdown("<p class='rs-sub'>Private, structured reflection with a lightweight scorecard. No raw text is shared by default.</p>", unsafe_allow_html=True)
+        st.markdown(
+            "<p class='rs-sub'>Private, structured reflection with a lightweight scorecard. No raw text is shared by default.</p>",
+            unsafe_allow_html=True,
+        )
     with col2:
         st.markdown("<div class='rs-card'>", unsafe_allow_html=True)
         st.markdown("**Logo slot**")
@@ -555,7 +389,6 @@ def view_home(store: Dict[str, Any]):
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.divider()
-
     left, right = st.columns(2, gap="large")
 
     with left:
@@ -612,7 +445,7 @@ def view_consent(store: Dict[str, Any], code: str):
     st.markdown(f"<div class='rs-title'>Thread: {code}</div>", unsafe_allow_html=True)
     st.markdown(
         f"<p class='rs-sub'>Initiator: <b>{inv.get('initiator_name')}</b> • Partner: <b>{inv.get('partner_name')}</b></p>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
     user_id = get_or_create_user_id()
@@ -669,7 +502,10 @@ def view_reflection(store: Dict[str, Any], code: str):
 
     st.markdown("<div class='rs-shell'>", unsafe_allow_html=True)
     st.markdown("<div class='rs-title'>Reflection</div>", unsafe_allow_html=True)
-    st.markdown("<p class='rs-sub'>Guided prompts + quick self-rating. A toxicity gate blocks harmful language.</p>", unsafe_allow_html=True)
+    st.markdown(
+        "<p class='rs-sub'>Guided prompts + quick self-rating. A toxicity gate blocks harmful language.</p>",
+        unsafe_allow_html=True,
+    )
 
     st.divider()
     left, right = st.columns([0.62, 0.38], gap="large")
@@ -710,10 +546,10 @@ def view_reflection(store: Dict[str, Any], code: str):
                     "ts": _now_iso(),
                     "user_id": user_id,
                     "effort": int(effort),
-                    "answers": answers,  # stored for your own history; not shared by default in UI
+                    "answers": answers,
                     "attachments": attachments,
                     "categories": cat_scores,
-                    "rgi": rgi,          # NEW key
+                    "rgi": rgi,
                 })
                 store["invites"][code] = inv
                 _save_store(store)
@@ -777,69 +613,11 @@ def view_dashboard(store: Dict[str, Any], code: str):
     st.markdown("<p class='rs-sub'>RGI (Relationship Growth Index), insights, and a lightweight red-flag dashboard.</p>", unsafe_allow_html=True)
     st.divider()
 
-    # TWO-COLUMN HERO
+    # TWO-COLUMN HERO (ring + explanation)
     hero_left, hero_right = st.columns([0.40, 0.60], gap="large", vertical_alignment="center")
 
     with hero_left:
-        export_size = st.selectbox(
-            "Export size",
-            options=[240, 512, 1024],
-            index=1,
-            help="Higher sizes produce sharper deck assets."
-        )
-
         st.markdown(render_rgi_progress_ring(rgi_point), unsafe_allow_html=True)
-
-        st.divider()
-        st.caption("Exports")
-
-        svg = build_rgi_ring_svg(rgi_point, size_px=export_size)
-        svg_t = build_rgi_ring_svg_transparent(rgi_point, size_px=export_size)
-
-        c1, c2 = st.columns(2)
-        with c1:
-            st.download_button(
-                "SVG",
-                data=svg,
-                file_name=f"RGI_{int(round(rgi_point))}_{export_size}px.svg",
-                mime="image/svg+xml",
-                use_container_width=True
-            )
-        with c2:
-            st.download_button(
-                "SVG (transparent)",
-                data=svg_t,
-                file_name=f"RGI_{int(round(rgi_point))}_{export_size}px_transparent.svg",
-                mime="image/svg+xml",
-                use_container_width=True
-            )
-
-        if MATPLOTLIB_OK:
-            p1, p2 = st.columns(2)
-            with p1:
-                png_t = build_rgi_ring_png_bytes(rgi_point, size_px=export_size, transparent=True)
-                st.download_button(
-                    "PNG (transparent)",
-                    data=png_t,
-                    file_name=f"RGI_{int(round(rgi_point))}_{export_size}px_transparent.png",
-                    mime="image/png",
-                    use_container_width=True
-                )
-            with p2:
-                png_s = build_rgi_ring_png_bytes(rgi_point, size_px=export_size, transparent=False)
-                st.download_button(
-                    "PNG (solid bg)",
-                    data=png_s,
-                    file_name=f"RGI_{int(round(rgi_point))}_{export_size}px_solid.png",
-                    mime="image/png",
-                    use_container_width=True
-                )
-        else:
-            st.warning("PNG export requires matplotlib. Add `matplotlib` to requirements.txt and redeploy.")
-
-        st.divider()
-        st.caption("Copy SVG to clipboard")
-        copy_svg_to_clipboard_ui(svg_t, height=130)
 
     with hero_right:
         st.markdown("<div class='rs-card'>", unsafe_allow_html=True)
