@@ -1,11 +1,8 @@
-
 import json
 import os
 import re
-import time
-from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -26,10 +23,12 @@ def _ensure_storage():
         with open(INVITES_PATH, "w", encoding="utf-8") as f:
             json.dump({"invites": {}}, f, indent=2)
 
+
 def _load_store() -> Dict[str, Any]:
     _ensure_storage()
     with open(INVITES_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
+
 
 def _save_store(store: Dict[str, Any]) -> None:
     _ensure_storage()
@@ -37,6 +36,7 @@ def _save_store(store: Dict[str, Any]) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(store, f, indent=2, ensure_ascii=False)
     os.replace(tmp, INVITES_PATH)
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -48,6 +48,7 @@ def _rand_code(n: int = 6) -> str:
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     import secrets
     return "".join(secrets.choice(alphabet) for _ in range(n))
+
 
 def get_or_create_user_id() -> str:
     if "user_id" not in st.session_state:
@@ -63,14 +64,16 @@ BANNED_PATTERNS = [
     r"\bkill\b", r"\bdie\b", r"\bworthless\b", r"\bhate you\b", r"\bshut up\b",
     r"\bstupid\b", r"\bidiot\b", r"\bslut\b", r"\bbitch\b", r"\basshole\b"
 ]
+
+
 def toxicity_score(text: str) -> float:
     if not text:
         return 0.0
     t = text.lower()
     hits = sum(1 for p in BANNED_PATTERNS if re.search(p, t))
-    # Also add small penalty for excessive ALL CAPS yelling
     caps_ratio = sum(1 for c in text if c.isupper()) / max(1, len(text))
     return min(1.0, 0.18 * hits + 0.3 * max(0.0, caps_ratio - 0.25))
+
 
 def enforce_toxicity_gate(texts: List[str], threshold: float = 0.55) -> Tuple[bool, float]:
     score = max(toxicity_score(t) for t in texts)
@@ -78,10 +81,9 @@ def enforce_toxicity_gate(texts: List[str], threshold: float = 0.55) -> Tuple[bo
 
 # -----------------------------
 # Scoring logic (prototype)
-# Flowchart alignment:
+# Now: RGI = Relationship Growth Index (0–100)
 # - Normalize text to 0–100
 # - Apply category weights (communication 35%, empathy 20%, etc.)
-# - Weight mutual reflection heavier
 # - Outlier dampening: trimmed mean/median blend
 # - Time weighting: EMA alpha 0.3–0.8 across multiple reflections
 # -----------------------------
@@ -108,20 +110,21 @@ CONN_POS = ["close", "love", "affection", "connect", "bond", "together", "intim"
 CONFLICT_SKILL = ["calm", "repair", "apolog", "resolve", "compromise", "boundary", "respect"]
 CONFLICT_NEG = ["always", "never", "ignore", "silent", "yell", "fight", "blame"]
 
+
 def _keyword_score(text: str, keywords: List[str]) -> float:
     t = (text or "").lower()
     return sum(1 for k in keywords if k in t)
 
+
 def _len_score(text: str) -> float:
-    # rewards reflection depth but caps
     n = len((text or "").strip())
     return min(1.0, n / 500.0)
+
 
 def score_categories(effort_1_5: int, answers: List[str], attachment_flags: Dict[str, bool]) -> Dict[str, float]:
     joined = " ".join(answers or [])
     effort = np.clip((effort_1_5 - 1) / 4, 0, 1)  # 0..1
 
-    # Base 0..1 signals
     comm = 0.35 * _len_score(joined) + 0.35 * np.tanh(_keyword_score(joined, COMM_POS) / 3) + 0.30 * effort
     emp  = 0.35 * _len_score(joined) + 0.35 * np.tanh(_keyword_score(joined, EMPATHY_POS) / 3) + 0.30 * effort
     rel  = 0.25 * _len_score(joined) + 0.45 * np.tanh(_keyword_score(joined, REL_POS) / 3) + 0.30 * effort
@@ -131,8 +134,7 @@ def score_categories(effort_1_5: int, answers: List[str], attachment_flags: Dict
     conflict_neg = np.tanh(_keyword_score(joined, CONFLICT_NEG) / 3)
     conflict = 0.35 * _len_score(joined) + 0.35 * conflict_pos + 0.30 * effort - 0.25 * conflict_neg
 
-    # Attachment indicators (optional) — used as small modifiers
-    # Flags: anxious, avoidant, secure
+    # Attachment modifiers (small)
     if attachment_flags.get("secure"):
         comm += 0.04; emp += 0.04; rel += 0.04; conn += 0.04; conflict += 0.04
     if attachment_flags.get("anxious"):
@@ -148,12 +150,12 @@ def score_categories(effort_1_5: int, answers: List[str], attachment_flags: Dict
         "Conflict Navigation": conflict,
         "Connection": conn,
     }
-    # Normalize to 0..100
-    norm = {k: float(np.clip(v, 0, 1) * 100) for k, v in raw.items()}
-    return norm
+    return {k: float(np.clip(v, 0, 1) * 100) for k, v in raw.items()}
 
-def rsq_from_categories(cat_scores: Dict[str, float], weights: Dict[str, float]) -> float:
+
+def rgi_from_categories(cat_scores: Dict[str, float], weights: Dict[str, float]) -> float:
     return float(sum(cat_scores[c] * weights.get(c, 0) for c in CATEGORIES))
+
 
 def trimmed_mean(values: List[float], trim: float = 0.1) -> float:
     if not values:
@@ -163,8 +165,9 @@ def trimmed_mean(values: List[float], trim: float = 0.1) -> float:
         return float(v.mean())
     k = int(len(v) * trim)
     v_sorted = np.sort(v)
-    v_trim = v_sorted[k:len(v_sorted)-k] if (len(v_sorted) - 2*k) > 0 else v_sorted
+    v_trim = v_sorted[k:len(v_sorted) - k] if (len(v_sorted) - 2 * k) > 0 else v_sorted
     return float(v_trim.mean())
+
 
 def median_blend(values: List[float]) -> float:
     if not values:
@@ -172,8 +175,10 @@ def median_blend(values: List[float]) -> float:
     v = np.array(values, dtype=float)
     return float(0.6 * np.median(v) + 0.4 * np.mean(v))
 
+
 def dampened_aggregate(values: List[float]) -> float:
     return float(0.5 * trimmed_mean(values, 0.1) + 0.5 * median_blend(values))
+
 
 def ema(values: List[float], alpha: float) -> float:
     if not values:
@@ -184,34 +189,34 @@ def ema(values: List[float], alpha: float) -> float:
         s = a * x + (1 - a) * s
     return float(s)
 
-def compute_dashboard(reflections: List[Dict[str, Any]], weights: Dict[str, float], ema_alpha: float) -> Dict[str, Any]:
-    """Return aggregates (RSQ and category scores) with outlier dampening + EMA across time."""
+
+def compute_dashboard(reflections: List[Dict[str, Any]], ema_alpha: float) -> Dict[str, Any]:
+    """Aggregates for RGI and category scores with outlier dampening + EMA across time.
+       Backward compatible: will read r['rgi'] else r['rsq'].
+    """
     if not reflections:
         return {
-            "rsq_point": 0.0,
-            "rsq_trend": 0.0,
+            "rgi_point": 0.0,
+            "rgi_trend": 0.0,
             "category_point": {c: 0.0 for c in CATEGORIES},
             "category_trend": {c: 0.0 for c in CATEGORIES},
             "n_reflections": 0
         }
 
-    # time order
     refl = sorted(reflections, key=lambda r: r.get("ts", ""))
-    rsqs = [float(r.get("rsq", 0.0)) for r in refl]
+    rgis = [float(r.get("rgi", r.get("rsq", 0.0))) for r in refl]
     cats_by_c = {c: [float(r.get("categories", {}).get(c, 0.0)) for r in refl] for c in CATEGORIES}
 
-    # Point estimate = dampened aggregate of last up to 10 entries
     tail_n = 10
-    rsq_point = dampened_aggregate(rsqs[-tail_n:])
+    rgi_point = dampened_aggregate(rgis[-tail_n:])
     category_point = {c: dampened_aggregate(vals[-tail_n:]) for c, vals in cats_by_c.items()}
 
-    # Trend = EMA on entire history
-    rsq_trend = ema(rsqs, ema_alpha)
+    rgi_trend = ema(rgis, ema_alpha)
     category_trend = {c: ema(vals, ema_alpha) for c, vals in cats_by_c.items()}
 
     return {
-        "rsq_point": rsq_point,
-        "rsq_trend": rsq_trend,
+        "rgi_point": rgi_point,
+        "rgi_trend": rgi_trend,
         "category_point": category_point,
         "category_trend": category_trend,
         "n_reflections": len(reflections)
@@ -239,13 +244,56 @@ def inject_branding():
         .rs-card{background:white; padding:16px; border-radius:18px; border:1px solid var(--rs-border);}
         .rs-small{color:var(--rs-muted); font-size:13px;}
         .rs-footer{color:var(--rs-muted); font-size:12px; padding-top:20px;}
+
+        /* RGI circle hero */
+        .rgi-wrap{
+          display:flex;
+          justify-content:flex-start;
+          align-items:center;
+          gap:18px;
+          margin: 8px 0 6px 0;
+        }
+        .rgi-circle{
+          width: 220px;
+          height: 220px;
+          border-radius: 999px;
+          border: 10px solid var(--rs-accent);
+          display:flex;
+          flex-direction:column;
+          justify-content:center;
+          align-items:center;
+          background: #FFFFFF;
+        }
+        .rgi-label{
+          font-size: 30px;
+          font-weight: 800;
+          color: var(--rs-accent);
+          line-height: 1.0;
+          letter-spacing: 1px;
+        }
+        .rgi-value{
+          font-size: 72px;
+          font-weight: 900;
+          color: var(--rs-text);
+          line-height: 1.0;
+          margin-top: 6px;
+        }
+        .rgi-name{
+          margin-top: 8px;
+          font-size: 14px;
+          color: var(--rs-muted);
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
+
 def footer():
-    st.markdown(f"<div class='rs-footer'>{MISSION}<br/>Prototype for demonstration only — no clinical, legal, or safety guarantees.</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='rs-footer'>{MISSION}<br/>Prototype for demonstration only — no clinical, legal, or safety guarantees.</div>",
+        unsafe_allow_html=True
+    )
 
 # -----------------------------
 # App views
@@ -263,7 +311,6 @@ def view_home(store: Dict[str, Any]):
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.divider()
-
     left, right = st.columns(2, gap="large")
 
     with left:
@@ -291,7 +338,6 @@ def view_home(store: Dict[str, Any]):
             st.success("Invite created.")
             st.info(f"Share this code with your partner: **{code}**")
             st.caption("Either party can withdraw consent; withdrawal clears the thread.")
-
         st.markdown("</div>", unsafe_allow_html=True)
 
     with right:
@@ -310,6 +356,7 @@ def view_home(store: Dict[str, Any]):
     st.markdown("</div>", unsafe_allow_html=True)
     footer()
 
+
 def view_consent(store: Dict[str, Any], code: str):
     inv = store["invites"].get(code)
     if not inv or inv.get("withdrawn"):
@@ -318,11 +365,14 @@ def view_consent(store: Dict[str, Any], code: str):
 
     st.markdown("<div class='rs-shell'>", unsafe_allow_html=True)
     st.markdown(f"<div class='rs-title'>Thread: {code}</div>", unsafe_allow_html=True)
-    st.markdown(f"<p class='rs-sub'>Initiator: <b>{inv.get('initiator_name')}</b> • Partner: <b>{inv.get('partner_name')}</b></p>", unsafe_allow_html=True)
+    st.markdown(
+        f"<p class='rs-sub'>Initiator: <b>{inv.get('initiator_name')}</b> • Partner: <b>{inv.get('partner_name')}</b></p>",
+        unsafe_allow_html=True
+    )
 
     user_id = get_or_create_user_id()
-
     st.divider()
+
     st.markdown("<div class='rs-card'>", unsafe_allow_html=True)
     st.subheader("Consent checkpoint (dual consent required)")
     st.write("RelateScore only processes reflections if both parties consent. Raw text is not shared by default.")
@@ -337,7 +387,6 @@ def view_consent(store: Dict[str, Any], code: str):
         _save_store(store)
         st.success("Consent saved.")
 
-    # Dual consent status
     dual = len([k for k, v in inv.get("consents", {}).items() if v]) >= 2
     if dual:
         st.success("Dual consent obtained. You may proceed to Reflection.")
@@ -359,6 +408,7 @@ def view_consent(store: Dict[str, Any], code: str):
     st.markdown("</div>", unsafe_allow_html=True)
     footer()
 
+
 def view_reflection(store: Dict[str, Any], code: str):
     inv = store["invites"].get(code)
     if not inv or inv.get("withdrawn"):
@@ -373,7 +423,7 @@ def view_reflection(store: Dict[str, Any], code: str):
         return
 
     st.markdown("<div class='rs-shell'>", unsafe_allow_html=True)
-    st.markdown(f"<div class='rs-title'>Reflection</div>", unsafe_allow_html=True)
+    st.markdown("<div class='rs-title'>Reflection</div>", unsafe_allow_html=True)
     st.markdown("<p class='rs-sub'>Guided prompts + quick self-rating. A toxicity gate blocks harmful language.</p>", unsafe_allow_html=True)
 
     st.divider()
@@ -402,7 +452,6 @@ def view_reflection(store: Dict[str, Any], code: str):
         toxicity_ok, tox_score = enforce_toxicity_gate([*answers], threshold=0.55)
         if not toxicity_ok:
             st.error(f"Input blocked by the toxicity gate (score {tox_score:.2f} > threshold). Please revise and resubmit.")
-            # Count toxicity events (for red-flag dashboard)
             if st.button("Acknowledge & return to input"):
                 inv["toxicity_events"] = int(inv.get("toxicity_events", 0)) + 1
                 store["invites"][code] = inv
@@ -410,16 +459,16 @@ def view_reflection(store: Dict[str, Any], code: str):
         else:
             if st.button("Submit reflection", type="primary"):
                 cat_scores = score_categories(effort, answers, attachments)
-                rsq = rsq_from_categories(cat_scores, DEFAULT_WEIGHTS)
+                rgi = rgi_from_categories(cat_scores, DEFAULT_WEIGHTS)
 
                 inv["reflections"].append({
                     "ts": _now_iso(),
                     "user_id": user_id,
                     "effort": int(effort),
-                    "answers": answers,  # stored for *your* history; not shared in UI
+                    "answers": answers,  # stored for your own history; not shared by default in UI
                     "attachments": attachments,
                     "categories": cat_scores,
-                    "rsq": rsq,
+                    "rgi": rgi,  # NEW key
                 })
                 store["invites"][code] = inv
                 _save_store(store)
@@ -430,8 +479,11 @@ def view_reflection(store: Dict[str, Any], code: str):
     with right:
         st.markdown("<div class='rs-card'>", unsafe_allow_html=True)
         st.subheader("Weights & time curve")
-        st.caption("Prototype weights match the flowchart example: Communication 35%, Empathy 20%, Reliability 20%, Conflict 15%, Connection 10%.")
-        ema_alpha = st.slider("Time-weighting alpha (EMA)", 0.30, 0.80, 0.50, 0.05, help="Higher = recent reflections influence more.")
+        st.caption("Prototype weights: Communication 35%, Empathy 20%, Reliability 20%, Conflict 15%, Connection 10%.")
+        ema_alpha = st.slider(
+            "Time-weighting alpha (EMA)", 0.30, 0.80, 0.50, 0.05,
+            help="Higher = recent reflections influence more."
+        )
         st.session_state["ema_alpha"] = ema_alpha
         st.divider()
         st.subheader("Privacy defaults")
@@ -440,6 +492,7 @@ def view_reflection(store: Dict[str, Any], code: str):
 
     st.markdown("</div>", unsafe_allow_html=True)
     footer()
+
 
 def view_dashboard(store: Dict[str, Any], code: str):
     inv = store["invites"].get(code)
@@ -455,15 +508,11 @@ def view_dashboard(store: Dict[str, Any], code: str):
         return
 
     ema_alpha = float(st.session_state.get("ema_alpha", 0.50))
-
-    # reflections are not separated for aggregate scoring; "mutual reflection heavier" is implemented as:
-    # if both parties have reflections within the last 7 days, apply a 1.10 multiplier on RSQ point estimate.
     refl = inv.get("reflections", [])
-    dashboard = compute_dashboard(refl, DEFAULT_WEIGHTS, ema_alpha)
+    dashboard = compute_dashboard(refl, ema_alpha)
 
-    # Mutual weighting check
+    # Mutual weighting check (if both parties reflected in last 7 days, apply a 1.10 multiplier)
     recent = sorted(refl, key=lambda r: r.get("ts", ""))[-10:]
-    # identify unique users in last 7 days
     week_ago = datetime.now(timezone.utc).timestamp() - 7 * 86400
     users_recent = set()
     for r in recent:
@@ -475,18 +524,42 @@ def view_dashboard(store: Dict[str, Any], code: str):
             users_recent.add(r.get("user_id"))
     mutual_bonus = 1.10 if len(users_recent) >= 2 else 1.00
 
-    rsq_point = float(np.clip(dashboard["rsq_point"] * mutual_bonus, 0, 100))
-    rsq_trend = float(np.clip(dashboard["rsq_trend"] * mutual_bonus, 0, 100))
+    rgi_point = float(np.clip(dashboard["rgi_point"] * mutual_bonus, 0, 100))
+    rgi_trend = float(np.clip(dashboard["rgi_trend"] * mutual_bonus, 0, 100))
 
     st.markdown("<div class='rs-shell'>", unsafe_allow_html=True)
     st.markdown("<div class='rs-title'>Private Output</div>", unsafe_allow_html=True)
-    st.markdown("<p class='rs-sub'>RSQ score, insights, and a lightweight red-flag dashboard.</p>", unsafe_allow_html=True)
+    st.markdown("<p class='rs-sub'>RGI score (Relationship Growth Index), insights, and a lightweight red-flag dashboard.</p>", unsafe_allow_html=True)
     st.divider()
 
-    top1, top2, top3 = st.columns(3)
-    top1.metric("RSQ (Dampened point estimate)", f"{rsq_point:0.1f}", help="Outlier dampening: trimmed mean + median blend (last 10).")
-    top2.metric("RSQ (EMA trend)", f"{rsq_trend:0.1f}", help="Time weighting across history.")
-    top3.metric("Reflections captured", f"{dashboard['n_reflections']}")
+    # HERO RGI circle
+    st.markdown(
+        f"""
+        <div class="rgi-wrap">
+          <div class="rgi-circle">
+            <div class="rgi-label">RGI</div>
+            <div class="rgi-value">{rgi_point:0.0f}</div>
+            <div class="rgi-name">Relationship Growth Index</div>
+          </div>
+          <div>
+            <div style="font-size:16px; font-weight:700; color:var(--rs-primary); margin-bottom:6px;">
+              What this means
+            </div>
+            <div style="color:var(--rs-muted); font-size:14px; line-height:1.5;">
+              RGI is a private, time-weighted growth signal (0–100) based on structured reflection.
+              It is non-diagnostic and designed to support clarity without judgment or exposure.
+            </div>
+            <div style="margin-top:10px;">
+              <span style="color:var(--rs-muted); font-size:13px;">EMA trend:</span>
+              <span style="font-weight:800; color:var(--rs-text); font-size:16px;"> {rgi_trend:0.1f}</span>
+              <span style="color:var(--rs-muted); font-size:13px;"> • Reflections:</span>
+              <span style="font-weight:800; color:var(--rs-text); font-size:16px;"> {dashboard['n_reflections']}</span>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     st.divider()
 
@@ -502,7 +575,6 @@ def view_dashboard(store: Dict[str, Any], code: str):
             "Weight": [DEFAULT_WEIGHTS[c] for c in CATEGORIES],
         })
         st.dataframe(df, use_container_width=True, hide_index=True)
-
         st.caption("Scores are indicative signals from text length + keyword heuristics + self-rated effort. Replace with calibrated model later.")
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -530,12 +602,11 @@ def view_dashboard(store: Dict[str, Any], code: str):
         tox_events = int(inv.get("toxicity_events", 0))
         st.write(f"• Toxicity gate triggers: **{tox_events}**")
 
-        # Simple risk flags from last 5 reflections
         last = sorted(refl, key=lambda r: r.get("ts", ""))[-5:]
-        conflict_vals = [r.get("categories", {}).get("Conflict Navigation", 0.0) for r in last]
-        empathy_vals = [r.get("categories", {}).get("Empathy", 0.0) for r in last]
-        low_conflict_skill = sum(1 for v in conflict_vals if float(v) < 35)
-        low_empathy = sum(1 for v in empathy_vals if float(v) < 35)
+        conflict_vals = [float(r.get("categories", {}).get("Conflict Navigation", 0.0)) for r in last]
+        empathy_vals = [float(r.get("categories", {}).get("Empathy", 0.0)) for r in last]
+        low_conflict_skill = sum(1 for v in conflict_vals if v < 35)
+        low_empathy = sum(1 for v in empathy_vals if v < 35)
 
         st.write(f"• Low conflict-navigation signals (last 5): **{low_conflict_skill}**")
         st.write(f"• Low empathy signals (last 5): **{low_empathy}**")
@@ -565,11 +636,11 @@ def view_dashboard(store: Dict[str, Any], code: str):
     mine = [r for r in refl if r.get("user_id") == user_id]
     if mine:
         hist = pd.DataFrame([{
-            "Timestamp (UTC)": r.get("ts",""),
+            "Timestamp (UTC)": r.get("ts", ""),
             "Effort": r.get("effort"),
-            "RSQ": round(float(r.get("rsq", 0.0)), 1),
+            "RGI": round(float(r.get("rgi", r.get("rsq", 0.0))), 1),
             **{c: round(float(r.get("categories", {}).get(c, 0.0)), 1) for c in CATEGORIES}
-        } for r in sorted(mine, key=lambda r: r.get("ts",""), reverse=True)])
+        } for r in sorted(mine, key=lambda r: r.get("ts", ""), reverse=True)])
         st.dataframe(hist, use_container_width=True, hide_index=True)
     else:
         st.info("No reflections from this session yet.")
@@ -594,7 +665,6 @@ def main():
         view_home(store)
         return
 
-    # For other pages, ensure a code is available
     if not code:
         st.sidebar.info("Join or create an invite code on Home first.")
         view_home(store)
