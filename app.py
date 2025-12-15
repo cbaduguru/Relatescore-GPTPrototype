@@ -1,643 +1,726 @@
-import json
-import os
-import re
-from datetime import datetime, timezone
-from typing import Dict, Any, List, Tuple
-
-import numpy as np
-import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components  # <-- NEW
+import matplotlib.pyplot as plt
+import numpy as np
+import random
+import string
+import time
 
-APP_NAME = "RelateScore™ Prototype"
-MISSION = "RelateScore™ provides private relational clarity that supports growth without judgment or exposure."
-
-DATA_DIR = ".data"
-INVITES_PATH = os.path.join(DATA_DIR, "invites.json")
-
-
-# -----------------------------
-# Storage helpers (JSON file)
-# -----------------------------
-def _ensure_storage():
-    os.makedirs(DATA_DIR, exist_ok=True)
-    if not os.path.exists(INVITES_PATH):
-        with open(INVITES_PATH, "w", encoding="utf-8") as f:
-            json.dump({"invites": {}}, f, indent=2)
-
-
-def _load_store() -> Dict[str, Any]:
-    _ensure_storage()
-    with open(INVITES_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _save_store(store: Dict[str, Any]) -> None:
-    _ensure_storage()
-    tmp = INVITES_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(store, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, INVITES_PATH)
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
+# ------------------------------------------------------------
+# RelateScore™ Streamlit Prototype (Cloud-safe navigation)
+# - Entry screen: only Create Profile + Log In (no Enter Invite Code)
+# - Home screen: exactly 3 buttons (Create Invite, Enter Invite Code, Withdraw and Reset)
+# - Tip microcopy appears directly under every "Enter Invite Code" button
+# - Invite codes work across sessions on the same Streamlit Cloud instance via shared in-memory store
+# ------------------------------------------------------------
+st.set_page_config(page_title="RelateScore™", page_icon="✅", layout="centered")
+st.set_option("client.showErrorDetails", True)
 
 # -----------------------------
-# Invite & user identity
+# Styling
 # -----------------------------
-def _rand_code(n: int = 6) -> str:
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    import secrets
-    return "".join(secrets.choice(alphabet) for _ in range(n))
+st.markdown(
+    """
+    <style>
+        .block-container { max-width: 520px; padding-top: 24px; }
+        h1, h2, h3 { color: #1A1A1A; font-family: sans-serif; }
+        .stButton > button {
+            background-color: #C6A667 !important;
+            color: #FFFFFF !important;
+            border-radius: 10px !important;
+            border: none !important;
+            padding: 10px 18px !important;
+            width: 100% !important;
+        }
+        .insight-card {
+            background-color: #FFFFFF;
+            border: 1px solid #C6A667;
+            border-radius: 10px;
+            padding: 14px;
+            margin-bottom: 10px;
+        }
+        .logo { text-align:center; margin-bottom: 10px; padding-top: 10px; overflow: visible !important; }
+        .logo svg { display:block; margin:0 auto; overflow: visible !important; }
+        .tagline { text-align:center; color:#3A3A3A; margin-bottom: 18px; }
+        .rgi-big { font-size: 54px; font-weight: 800; color: #C6A667; text-align: center; line-height: 1.0; }
+        .small-muted { color:#666; font-size: 0.92rem; }
+        .tip-under-btn { margin-top: -10px; margin-bottom: 14px; }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
+LOGO_SVG = """
+<div class="logo">
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-label="RelateScore logo">
+  <circle cx="32" cy="32" r="20" stroke="#C6A667" stroke-width="4" fill="none"/>
+  <path d="M22 32 L29 39 L44 24" stroke="#C6A667" stroke-width="4" fill="none"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+<div style="font-size: 22px; font-weight: 700; margin-top: 6px;">RelateScore™</div>
+</div>
+"""
 
-def get_or_create_user_id() -> str:
-    if "user_id" not in st.session_state:
-        import secrets
-        st.session_state.user_id = secrets.token_hex(8)
-    return st.session_state.user_id
-
+def display_logo():
+    st.markdown(LOGO_SVG, unsafe_allow_html=True)
 
 # -----------------------------
-# Safety / Toxicity filter (prototype heuristic)
+# Rerun compatibility (Cloud safe)
 # -----------------------------
-BANNED_PATTERNS = [
-    r"\bkill\b", r"\bdie\b", r"\bworthless\b", r"\bhate you\b", r"\bshut up\b",
-    r"\bstupid\b", r"\bidiot\b", r"\bslut\b", r"\bbitch\b", r"\basshole\b",
+def _rerun():
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()
+
+def nav(to_page: str):
+    st.session_state.page = to_page
+    _rerun()
+
+# -----------------------------
+# Invite Store (shared across sessions)
+# -----------------------------
+INVITE_TTL_SECONDS = 60 * 30  # 30 minutes
+
+@st.cache_resource
+def get_invite_store():
+    # { CODE: {"created_at": ts, "used": bool} }
+    return {}
+
+def _clean_expired_invites(store: dict):
+    now = time.time()
+    expired = [code for code, meta in store.items()
+               if (now - meta.get("created_at", now)) > INVITE_TTL_SECONDS]
+    for code in expired:
+        store.pop(code, None)
+
+def register_invite(code: str) -> None:
+    store = get_invite_store()
+    _clean_expired_invites(store)
+    store[code] = {"created_at": time.time(), "used": False}
+
+def validate_invite(code: str):
+    """
+    Returns (is_valid, reason)
+    Reasons: ok | missing | expired | used
+    """
+    store = get_invite_store()
+    _clean_expired_invites(store)
+    meta = store.get(code)
+    if not meta:
+        return False, "missing"
+    if (time.time() - meta.get("created_at", time.time())) > INVITE_TTL_SECONDS:
+        store.pop(code, None)
+        return False, "expired"
+    if meta.get("used"):
+        return False, "used"
+    return True, "ok"
+
+def consume_invite(code: str) -> None:
+    store = get_invite_store()
+    meta = store.get(code)
+    if meta:
+        meta["used"] = True
+
+# -----------------------------
+# Data
+# -----------------------------
+CATEGORIES = [
+    "Emotional Awareness",
+    "Communication Style",
+    "Conflict Tendencies",
+    "Attachment Patterns",
+    "Empathy & Responsiveness",
+    "Self-Insight",
+    "Trust & Boundaries",
+    "Stability & Consistency"
 ]
 
-
-def toxicity_score(text: str) -> float:
-    if not text:
-        return 0.0
-    t = text.lower()
-    hits = sum(1 for p in BANNED_PATTERNS if re.search(p, t))
-    caps_ratio = sum(1 for c in text if c.isupper()) / max(1, len(text))
-    return min(1.0, 0.18 * hits + 0.3 * max(0.0, caps_ratio - 0.25))
-
-
-def enforce_toxicity_gate(texts: List[str], threshold: float = 0.55) -> Tuple[bool, float]:
-    score = max(toxicity_score(t) for t in texts)
-    return (score <= threshold), score
-
-
 # -----------------------------
-# Scoring logic (prototype)
+# RQ Wheel Color System (per category)
+# - Uses RelateScore palette where possible (Accent Blue / Mint / Gold)
+# - Adds distinct, premium-safe supporting colors for clear differentiation
 # -----------------------------
-CATEGORIES = ["Communication", "Empathy", "Reliability", "Conflict Navigation", "Connection"]
-
-DEFAULT_WEIGHTS = {
-    "Communication": 0.35,
-    "Empathy": 0.20,
-    "Reliability": 0.20,
-    "Conflict Navigation": 0.15,
-    "Connection": 0.10,
+CATEGORY_COLORS = {
+    "Emotional Awareness": "#2E6AF3",        # Accent Blue
+    "Communication Style": "#0C9A6F",        # Success Green
+    "Conflict Tendencies": "#E54646",        # Error Red
+    "Attachment Patterns": "#6B5B95",        # Deep Violet (supporting)
+    "Empathy & Responsiveness": "#A6E3DA",   # Mint
+    "Self-Insight": "#F4A623",               # Warning Amber
+    "Trust & Boundaries": "#C6A667",         # Gold
+    "Stability & Consistency": "#1A1A1A",    # Charcoal
 }
 
-PROMPTS = [
-    "In the past week, what did your partner do that helped you feel supported?",
-    "What is one moment you felt misunderstood, and what did you need instead?",
-    "What is one small change you can make next week to improve the relationship?",
-]
+def _hex_to_rgb01(hex_color: str):
+    hex_color = hex_color.lstrip("#")
+    return tuple(int(hex_color[i:i+2], 16) / 255.0 for i in (0, 2, 4))
 
-EMPATHY_POS = ["understand", "heard", "care", "empath", "support", "validate", "compassion"]
-COMM_POS = ["talk", "discuss", "communicat", "listen", "clarify", "share", "ask"]
-REL_POS = ["reliable", "consistent", "follow through", "depend", "trust", "kept", "promise"]
-CONN_POS = ["close", "love", "affection", "connect", "bond", "together", "intim"]
-CONFLICT_SKILL = ["calm", "repair", "apolog", "resolve", "compromise", "boundary", "respect"]
-CONFLICT_NEG = ["always", "never", "ignore", "silent", "yell", "fight", "blame"]
+def _blend_hex(c1: str, c2: str, t: float) -> str:
+    """Blend c1->c2 with t in [0,1]. Returns hex string."""
+    t = float(np.clip(t, 0.0, 1.0))
+    r1, g1, b1 = _hex_to_rgb01(c1)
+    r2, g2, b2 = _hex_to_rgb01(c2)
+    r = r1 + (r2 - r1) * t
+    g = g1 + (g2 - g1) * t
+    b = b1 + (b2 - b1) * t
+    return "#{:02X}{:02X}{:02X}".format(int(r * 255), int(g * 255), int(b * 255))
 
+def _category_dynamic_color(category: str, score: float) -> str:
+    """Real-time color per category based on its score (0-100):
+    - Low scores bias toward a warm neutral (subtle)
+    - High scores move toward the category's base color
+    """
+    base = CATEGORY_COLORS.get(category, "#2E6AF3")
+    warm_neutral = "#FAFAF8"  # Warm Surface
+    # Map score to intensity; keep conservative so it stays premium
+    intensity = float(np.clip((score - 20.0) / 70.0, 0.0, 1.0))  # 20->0, 90->1
+    return _blend_hex(warm_neutral, base, intensity)
 
-def _keyword_score(text: str, keywords: List[str]) -> float:
-    t = (text or "").lower()
-    return sum(1 for k in keywords if k in t)
+def draw_rq_wheel(ax, categories, scores_dict):
+    """Draw an RQ Wheel with per-category colors + wedge fills."""
+    n = len(categories)
+    angles = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    values = np.array([float(scores_dict[c]) for c in categories], dtype=float)
 
+    # Close the polygon
+    angles_loop = np.concatenate([angles, [angles[0]]])
+    values_loop = np.concatenate([values, [values[0]]])
 
-def _len_score(text: str) -> float:
-    n = len((text or "").strip())
-    return min(1.0, n / 500.0)
+    # Background + grid styling
+    ax.set_facecolor("#FAFAF8")
+    ax.grid(True, linewidth=0.8, alpha=0.25)
+    ax.spines["polar"].set_alpha(0.25)
+    ax.set_ylim(0, 100)
+    ax.set_yticks([20, 40, 60, 80, 100])
+    ax.set_yticklabels([])
 
+    # Colored wedges per category (gives the "real-time" multi-color feel)
+    for i in range(n):
+        a0 = angles[i]
+        a1 = angles[(i + 1) % n]
+        v0 = values[i]
+        v1 = values[(i + 1) % n]
 
-def score_categories(effort_1_5: int, answers: List[str], attachment_flags: Dict[str, bool]) -> Dict[str, float]:
-    joined = " ".join(answers or [])
-    effort = np.clip((effort_1_5 - 1) / 4, 0, 1)  # 0..1
+        # Handle wrap-around for the last wedge
+        if i == n - 1:
+            a1 = angles[0] + 2 * np.pi
 
-    comm = 0.35 * _len_score(joined) + 0.35 * np.tanh(_keyword_score(joined, COMM_POS) / 3) + 0.30 * effort
-    emp  = 0.35 * _len_score(joined) + 0.35 * np.tanh(_keyword_score(joined, EMPATHY_POS) / 3) + 0.30 * effort
-    rel  = 0.25 * _len_score(joined) + 0.45 * np.tanh(_keyword_score(joined, REL_POS) / 3) + 0.30 * effort
-    conn = 0.25 * _len_score(joined) + 0.45 * np.tanh(_keyword_score(joined, CONN_POS) / 3) + 0.30 * effort
+        col = _category_dynamic_color(categories[i], v0)
+        ax.fill([a0, a0, a1, a1], [0, v0, v1, 0], color=col, alpha=0.22, linewidth=0)
 
-    conflict_pos = np.tanh(_keyword_score(joined, CONFLICT_SKILL) / 3)
-    conflict_neg = np.tanh(_keyword_score(joined, CONFLICT_NEG) / 3)
-    conflict = 0.35 * _len_score(joined) + 0.35 * conflict_pos + 0.30 * effort - 0.25 * conflict_neg
+    # Outline polygon (neutral premium stroke)
+    ax.plot(angles_loop, values_loop, linewidth=2.2, alpha=0.9)
 
-    if attachment_flags.get("secure"):
-        comm += 0.04; emp += 0.04; rel += 0.04; conn += 0.04; conflict += 0.04
-    if attachment_flags.get("anxious"):
-        conflict -= 0.04
-    if attachment_flags.get("avoidant"):
-        conn -= 0.04
-        comm -= 0.02
+    # Markers per axis in category color
+    for i, cat in enumerate(categories):
+        v = float(values[i])
+        mcol = _category_dynamic_color(cat, v)
+        ax.scatter([angles[i]], [v], s=60, c=[mcol], edgecolors="#1A1A1A", linewidths=0.6, zorder=5)
 
-    raw = {
-        "Communication": comm,
-        "Empathy": emp,
-        "Reliability": rel,
-        "Conflict Navigation": conflict,
-        "Connection": conn,
-    }
-    return {k: float(np.clip(v, 0, 1) * 100) for k, v in raw.items()}
+    # Category labels, colored to match
+    ax.set_xticks(angles)
+    labels = []
+    for i, cat in enumerate(categories):
+        v = float(values[i])
+        labels.append(cat)
+        # Apply colored tick labels after set_xticklabels
+    ax.set_xticklabels(labels, fontsize=10)
+    for tick, cat in zip(ax.get_xticklabels(), categories):
+        tick.set_color(CATEGORY_COLORS.get(cat, "#1A1A1A"))
+        tick.set_fontweight("medium")
 
+LIKERT_QUESTIONS = {
+    cat: [
+        f"On a scale of 1–5, how important is {cat.lower()} to you in relationships?",
+        f"How would you rate your current level in {cat.lower()}?",
+        f"How often do you reflect on {cat.lower()}?"
+    ]
+    for cat in CATEGORIES
+}
 
-def rgi_from_categories(cat_scores: Dict[str, float], weights: Dict[str, float]) -> float:
-    return float(sum(cat_scores[c] * weights.get(c, 0) for c in CATEGORIES))
-
-
-def dampened_aggregate(values: List[float]) -> float:
-    if not values:
-        return 0.0
-    v = np.array(values, dtype=float)
-    if len(v) < 5:
-        return float(v.mean())
-    v_sorted = np.sort(v)
-    k = int(len(v_sorted) * 0.1)
-    v_trim = v_sorted[k:len(v_sorted) - k] if (len(v_sorted) - 2 * k) > 0 else v_sorted
-    return float(0.5 * v_trim.mean() + 0.5 * (0.6 * np.median(v) + 0.4 * v.mean()))
-
-
-def ema(values: List[float], alpha: float) -> float:
-    if not values:
-        return 0.0
-    a = float(np.clip(alpha, 0.01, 0.99))
-    s = values[0]
-    for x in values[1:]:
-        s = a * x + (1 - a) * s
-    return float(s)
-
-
-def compute_dashboard(reflections: List[Dict[str, Any]], ema_alpha: float) -> Dict[str, Any]:
-    if not reflections:
-        return {
-            "rgi_point": 0.0,
-            "rgi_trend": 0.0,
-            "category_point": {c: 0.0 for c in CATEGORIES},
-            "category_trend": {c: 0.0 for c in CATEGORIES},
-            "n_reflections": 0
-        }
-
-    refl = sorted(reflections, key=lambda r: r.get("ts", ""))
-    rgis = [float(r.get("rgi", r.get("rsq", 0.0))) for r in refl]
-    cats_by_c = {c: [float(r.get("categories", {}).get(c, 0.0)) for r in refl] for c in CATEGORIES}
-
-    tail_n = 10
-    rgi_point = dampened_aggregate(rgis[-tail_n:])
-    category_point = {c: dampened_aggregate(vals[-tail_n:]) for c, vals in cats_by_c.items()}
-
-    rgi_trend = ema(rgis, ema_alpha)
-    category_trend = {c: ema(vals, ema_alpha) for c, vals in cats_by_c.items()}
-
-    return {
-        "rgi_point": rgi_point,
-        "rgi_trend": rgi_trend,
-        "category_point": category_point,
-        "category_trend": category_trend,
-        "n_reflections": len(reflections)
-    }
-
+ASSESSMENT_QUESTIONS = {
+    cat: [
+        f"How often do you recognize patterns in {cat.lower()}?",
+        f"How comfortable are you discussing {cat.lower()}?",
+        f"How does {cat.lower()} impact your connections?"
+    ]
+    for cat in CATEGORIES
+}
 
 # -----------------------------
-# Branding / CSS
+# Session state init
 # -----------------------------
-def inject_branding():
-    st.set_page_config(page_title=APP_NAME, page_icon="🧭", layout="wide")
-    st.markdown(
-        """
-        <style>
-        :root{
-          --rs-primary:#2C2A4A;
-          --rs-soft:#F4F6FB;
-          --rs-muted:#475569;
-          --rs-border:#E2E8F0;
-          --rs-card:#FFFFFF;
-        }
-        @media (prefers-color-scheme: dark){
-          :root{
-            --rs-soft:#0B1220;
-            --rs-muted:#9CA3AF;
-            --rs-border:#1F2937;
-            --rs-card:#0F172A;
-          }
-        }
-        .rs-shell{background:var(--rs-soft); padding:18px 18px 6px 18px; border-radius:18px; border:1px solid var(--rs-border);}
-        .rs-title{font-size:28px; font-weight:700; color:var(--rs-primary); margin-bottom:6px;}
-        .rs-sub{color:var(--rs-muted); margin-top:0px; margin-bottom:0px;}
-        .rs-card{background:var(--rs-card); padding:16px; border-radius:18px; border:1px solid var(--rs-border);}
-        .rs-footer{color:var(--rs-muted); font-size:12px; padding-top:20px;}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+def init_state():
+    defaults = {
+        "page": "entry",
+        "logged_in": False,
+        "consent_accepted": False,
 
+        # Invite flow (local convenience)
+        "invite_code": None,  # last generated code in THIS session
+        "partner_code": "",
 
-def footer():
+        # Assessment flow
+        "use_mutual": False,
+        "likert_responses": {},
+        "assessment_responses": {},
+        "scores": None,
+        "raw_scores": None,
+        "prev_scores": None,
+        "prev_scores_ts": None,
+        "score_history": [],
+        "insights": None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+def reset_state():
+    for k in list(st.session_state.keys()):
+        del st.session_state[k]
+    init_state()
+
+init_state()
+
+# -----------------------------
+# Helpers
+# -----------------------------
+# -----------------------------
+# Stability Smoothing (EMA + Dampening)
+# Notes:
+# - In this Streamlit prototype we store prior scores in session_state (per browser session).
+# - In production, persist these per-user in your backend so smoothing is consistent across devices/sessions.
+EMA_ALPHA = 0.25  # 0<alpha<=1; lower = smoother, higher = more responsive
+MAX_DAILY_CHANGE = 15.0  # max allowed change in score points per day (per category)
+MIN_CHANGE_FLOOR = 2.0   # minimum allowed change even if dt is very small (prevents "stuck" feeling)
+OUTLIER_SOFT_THRESHOLD = 25.0  # deltas above this get compressed ("dampened")
+
+def _now_ts() -> float:
+    return time.time()
+
+def _dt_days(prev_ts: float | None) -> float:
+    if not prev_ts:
+        return 1.0
+    dt = max(0.0, _now_ts() - float(prev_ts))
+    return max(dt / 86400.0, 1.0 / 1440.0)  # at least 1 minute
+
+def _dampen_delta(delta: float, threshold: float = OUTLIER_SOFT_THRESHOLD) -> float:
+    """Soft dampening: compress very large deltas without hard-clipping."""
+    ad = abs(delta)
+    if ad <= threshold:
+        return delta
+    # Beyond threshold, compress using a square-root curve (smooth, monotonic)
+    compressed = threshold + (ad - threshold) ** 0.5 * 5.0
+    return float(np.sign(delta) * compressed)
+
+def _cap_delta(delta: float, allowed: float) -> float:
+    if abs(delta) <= allowed:
+        return delta
+    return float(np.sign(delta) * allowed)
+
+def smooth_scores(new_scores: dict, prev_scores: dict | None, prev_ts: float | None) -> dict:
+    """Apply EMA smoothing + outlier dampening + max-delta cap to category scores (not including RGI)."""
+    if not prev_scores:
+        return new_scores
+
+    days = _dt_days(prev_ts)
+    allowed = max(MIN_CHANGE_FLOOR, MAX_DAILY_CHANGE * days)
+
+    smoothed = {}
+    for cat in CATEGORIES:
+        new_v = float(new_scores.get(cat, 0.0))
+        old_v = float(prev_scores.get(cat, new_v))
+
+        # 1) dampen outliers in the update step
+        raw_delta = new_v - old_v
+        damp_delta = _dampen_delta(raw_delta)
+
+        # 2) EMA on the dampened target
+        target = old_v + damp_delta
+        ema = old_v + EMA_ALPHA * (target - old_v)
+
+        # 3) cap maximum movement based on elapsed time
+        capped_delta = _cap_delta(ema - old_v, allowed)
+        smoothed[cat] = float(np.clip(old_v + capped_delta, 20, 90))
+
+    return smoothed
+
+def generate_invite_code(length: int = 8) -> str:
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+
+def compute_scores():
+    # --- Step 1: Compute "raw" category scores from the current assessment session
+    raw_cat_scores = {}
+    for cat in CATEGORIES:
+        likert_vals = [st.session_state.likert_responses[q] for q in LIKERT_QUESTIONS[cat]]
+        assess_vals = [st.session_state.assessment_responses[q] for q in ASSESSMENT_QUESTIONS[cat]]
+
+        baseline = float(np.mean(likert_vals)) * 20.0
+        raw = float(np.mean(assess_vals)) * 20.0
+
+        score = (raw / baseline) * 50.0 if baseline > 0 else raw
+
+        if st.session_state.use_mutual:
+            mutual = float(np.random.uniform(40, 80))
+            score = 0.4 * score + 0.6 * mutual
+
+        raw_cat_scores[cat] = float(np.clip(score, 20, 90))
+
+    st.session_state.raw_scores = dict(raw_cat_scores)
+
+    # --- Step 2: Apply stability smoothing (EMA + dampening)
+    prev_scores = st.session_state.get("prev_scores")
+    prev_ts = st.session_state.get("prev_scores_ts")
+    smoothed_cats = smooth_scores(raw_cat_scores, prev_scores, prev_ts)
+
+    # --- Step 3: Compute RGI from the (smoothed) category scores
+    weights = np.array([0.15, 0.15, 0.15, 0.10, 0.15, 0.10, 0.10, 0.10], dtype=float)
+    rgi = float(np.sum(np.array([smoothed_cats[c] for c in CATEGORIES], dtype=float) * weights))
+
+    final_scores = dict(smoothed_cats)
+    final_scores["RGI"] = float(np.clip(rgi, 20, 90))
+
+    # --- Step 4: Persist the smoothed state for next computation (prototype: per session)
+    st.session_state.scores = final_scores
+    st.session_state.prev_scores = dict(smoothed_cats)
+    st.session_state.prev_scores_ts = _now_ts()
+
+    # Optional: keep a short history for debugging / future UI
+    hist = st.session_state.get("score_history", [])
+    hist.append({
+        "ts": st.session_state.prev_scores_ts,
+        "raw": dict(raw_cat_scores),
+        "smoothed": dict(smoothed_cats),
+        "rgi": final_scores["RGI"],
+    })
+    st.session_state.score_history = hist[-20:]
+
+def generate_insights():
+    insights = []
+    for cat in CATEGORIES:
+        score = st.session_state.scores.get(cat, 0)
+        if score > 70:
+            type_ = "Strength"
+            desc = "This is a strong foundation to build on."
+        elif score < 40:
+            type_ = "Blind Spot"
+            desc = "This pattern may create misunderstandings."
+        else:
+            type_ = "Neutral"
+            desc = "Balanced area with room for awareness."
+        insights.append({
+            "category": cat,
+            "type": type_,
+            "description": desc,
+            "suggestion": "Consider a small experiment this week to shift this pattern by 1%."
+        })
+    st.session_state.insights = insights
+
+def tip_microcopy():
     st.markdown(
-        f"<div class='rs-footer'>{MISSION}<br/>Prototype for demonstration only — no clinical, legal, or safety guarantees.</div>",
+        "<div class='small-muted tip-under-btn'>Tip: If you're joining via code, the sender must generate one first.</div>",
         unsafe_allow_html=True
     )
 
+# ------------------------------------------------------------
+# Pages
+# ------------------------------------------------------------
 
-# -----------------------------
-# Ring (self-contained HTML for components.html)
-# -----------------------------
-def _interp_hex(c1: str, c2: str, t: float) -> str:
-    t = float(np.clip(t, 0, 1))
-    c1 = c1.lstrip("#"); c2 = c2.lstrip("#")
-    r1, g1, b1 = int(c1[0:2], 16), int(c1[2:4], 16), int(c1[4:6], 16)
-    r2, g2, b2 = int(c2[0:2], 16), int(c2[2:4], 16), int(c2[4:6], 16)
-    r = int(r1 + (r2 - r1) * t)
-    g = int(g1 + (g2 - g1) * t)
-    b = int(b1 + (b2 - b1) * t)
-    return f"#{r:02X}{g:02X}{b:02X}"
+def home_footer_microcopy():
+    st.markdown(
+        "<hr style='margin-top:32px;margin-bottom:12px;'>"
+        "<div class='small-muted' style='text-align:center;'>"
+        "RelateScore™ provides private relational clarity that supports growth without judgment or exposure."
+        "</div>",
+        unsafe_allow_html=True
+    )
+def entry_page():
+    display_logo()
+    st.markdown('<div class="tagline">Private reflection. Shared only by choice.</div>', unsafe_allow_html=True)
 
+    if st.button("Create Profile", key="entry_create"):
+        nav("create_profile")
 
-def rgi_color_growth_band(v: float) -> str:
-    v = float(np.clip(v, 0, 100))
-    low  = ("#64748B", 0)
-    mid  = ("#3B82F6", 55)
-    high = ("#6366F1", 100)
-    if v <= mid[1]:
-        t = (v - low[1]) / (mid[1] - low[1] + 1e-9)
-        return _interp_hex(low[0], mid[0], t)
-    t = (v - mid[1]) / (high[1] - mid[1] + 1e-9)
-    return _interp_hex(mid[0], high[0], t)
+    if st.button("Log In", key="entry_login"):
+        nav("log_in")
 
+def create_profile_page():
+    display_logo()
+    st.header("Create your private profile")
+    st.write("Your responses are encrypted and visible only by choice.")
 
-def ring_html(rgi_value: float) -> str:
-    v = float(np.clip(rgi_value, 0, 100))
-    size = 240
-    stroke = 18
-    radius = (size - stroke) / 2
-    cx = cy = size / 2
-    circumference = 2 * np.pi * radius
-    progress = (v / 100.0) * circumference
-    dash_from = circumference
-    dash_to = max(0.0, circumference - progress)
-
-    ring_color = rgi_color_growth_band(v)
-    tooltip = (
-        f"RGI (Relationship Growth Index): {int(v)}/100. "
-        "A private, time-weighted growth signal based on structured reflection."
+    st.session_state.consent_accepted = st.checkbox(
+        "I understand that my reflections are private, encrypted, and can be deleted at any time.",
+        value=st.session_state.consent_accepted,
+        key="consent_checkbox"
     )
 
-    return f"""
-<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <style>
-      :root {{
-        --bg-ring: rgba(59,130,246,0.20);
-        --text: #0F172A;
-        --subtext: #475569;
-      }}
-      @media (prefers-color-scheme: dark) {{
-        :root {{
-          --bg-ring: rgba(59,130,246,0.25);
-          --text: #E5E7EB;
-          --subtext: #9CA3AF;
-        }}
-      }}
-      body {{
-        margin: 0;
-        padding: 0;
-        background: transparent;
-        font-family: sans-serif;
-      }}
-      .wrap {{
-        width: {size}px;
-        height: {size}px;
-        position: relative;
-        margin: 0 auto;
-      }}
-      @keyframes fill {{
-        from {{ stroke-dashoffset: {dash_from:.2f}; }}
-        to   {{ stroke-dashoffset: {dash_to:.2f}; }}
-      }}
-      .anim {{
-        animation: fill 1.15s ease-out forwards;
-      }}
-      .center {{
-        position:absolute;
-        inset:0;
-        display:flex;
-        flex-direction:column;
-        align-items:center;
-        justify-content:center;
-        pointer-events:none;
-        text-align:center;
-      }}
-      .label {{
-        font-size: 30px;
-        font-weight: 800;
-        color: {ring_color};
-        line-height: 1;
-      }}
-      .value {{
-        font-size: 72px;
-        font-weight: 900;
-        color: var(--text);
-        line-height: 1;
-        margin-top: 6px;
-      }}
-      .sub {{
-        font-size: 14px;
-        color: var(--subtext);
-        margin-top: 6px;
-      }}
-    </style>
-  </head>
-  <body>
-    <div class="wrap">
-      <svg width="{size}" height="{size}" viewBox="0 0 {size} {size}" style="position:absolute;top:0;left:0;">
-        <title>{tooltip}</title>
-        <circle cx="{cx}" cy="{cy}" r="{radius}" fill="none" stroke="var(--bg-ring)" stroke-width="{stroke}"/>
-        <circle cx="{cx}" cy="{cy}" r="{radius}"
-          fill="none"
-          stroke="{ring_color}"
-          stroke-width="{stroke}"
-          stroke-linecap="round"
-          stroke-dasharray="{circumference:.2f}"
-          stroke-dashoffset="{dash_from:.2f}"
-          transform="rotate(-90 {cx} {cy})"
-          class="anim"
-        />
-      </svg>
-      <div class="center">
-        <div class="label">RGI</div>
-        <div class="value">{int(v)}</div>
-        <div class="sub">Relationship Growth Index</div>
-      </div>
-    </div>
-  </body>
-</html>
-"""
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Back", key="create_back"):
+            nav("entry")
+    with c2:
+        if st.button("Continue", key="create_continue", disabled=not st.session_state.consent_accepted):
+            st.session_state.logged_in = True
+            nav("home")
+
+def log_in_page():
+    display_logo()
+    st.header("Welcome back")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Back", key="login_back"):
+            nav("entry")
+    with c2:
+        if st.button("Log In", key="login_go"):
+            st.session_state.logged_in = True
+            nav("home")
+
+def home_page():
+    """
+    Home shows exactly 3 buttons:
+      1) Create Invite
+      2) Enter Invite Code (with tip microcopy underneath)
+      3) Withdraw and Reset
+    """
+    display_logo()
+    st.header("Home")
+
+    if not st.session_state.logged_in:
+        st.warning("Please log in or create a profile to continue.")
+        if st.button("Return to Entry", key="home_return_entry"):
+            nav("entry")
+        return
+
+    if st.button("Create Invite", key="home_create_invite"):
+        code = generate_invite_code()
+        st.session_state.invite_code = code
+        register_invite(code)
+        nav("create_invite")
+
+    if st.button("Enter Invite Code", key="home_enter_invite"):
+        nav("enter_invite")
+    tip_microcopy()
+
+    if st.button("Withdraw and Reset", key="home_reset"):
+        reset_state()
+        nav("entry")
+
+    home_footer_microcopy()
 
 
-# -----------------------------
-# Views
-# -----------------------------
-def view_home(store: Dict[str, Any]):
-    st.markdown("<div class='rs-shell'>", unsafe_allow_html=True)
-    col1, col2 = st.columns([0.75, 0.25], vertical_alignment="center")
-    with col1:
-        st.markdown(f"<div class='rs-title'>{APP_NAME}</div>", unsafe_allow_html=True)
-        st.markdown("<p class='rs-sub'>Private, structured reflection with a lightweight scorecard.</p>", unsafe_allow_html=True)
-    with col2:
-        st.markdown("<div class='rs-card'>", unsafe_allow_html=True)
-        st.markdown("**Logo slot**")
-        st.caption("Replace with your brand asset later.")
-        st.markdown("</div>", unsafe_allow_html=True)
+def create_invite_page():
+    display_logo()
+    st.header("Create Invite")
 
-    st.divider()
-    left, right = st.columns(2, gap="large")
+    if not st.session_state.invite_code:
+        code = generate_invite_code()
+        st.session_state.invite_code = code
+        register_invite(code)
 
-    with left:
-        st.markdown("<div class='rs-card'>", unsafe_allow_html=True)
-        st.subheader("Start a new reflection thread")
-        initiator = st.text_input("Your name (or alias)", value=st.session_state.get("name", ""))
-        partner = st.text_input("Partner name (or alias)", value=st.session_state.get("partner_name", ""))
-        st.session_state["name"] = initiator
-        st.session_state["partner_name"] = partner
+    st.write("Share this invitation code privately with your partner:")
+    st.code(st.session_state.invite_code)
 
-        if st.button("Create invite", type="primary"):
-            code = _rand_code()
-            user_id = get_or_create_user_id()
-            store["invites"][code] = {
-                "code": code,
-                "created_at": _now_iso(),
-                "initiator_name": initiator.strip() or "Initiator",
-                "partner_name": partner.strip() or "Partner",
-                "consents": {user_id: True},
-                "withdrawn": False,
-                "reflections": [],
-                "toxicity_events": 0,
-            }
-            _save_store(store)
-            st.success("Invite created.")
-            st.info(f"Share this code with your partner: **{code}**")
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='small-muted'>This code expires in {INVITE_TTL_SECONDS//60} minutes and can be used once.</div>",
+        unsafe_allow_html=True
+    )
 
-    with right:
-        st.markdown("<div class='rs-card'>", unsafe_allow_html=True)
-        st.subheader("Join with an invite code")
-        code = st.text_input("Invite code", value=st.session_state.get("code", "")).strip().upper()
-        st.session_state["code"] = code
-        if st.button("Join"):
-            if code in store["invites"] and not store["invites"][code].get("withdrawn"):
-                st.success("Invite found. Continue to Consent & Reflect in the sidebar.")
-                st.session_state["active_code"] = code
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Back to Home", key="invite_back_home"):
+            nav("home")
+    with c2:
+        if st.button("Enter Invite Code", key="invite_go_enter"):
+            nav("enter_invite")
+    tip_microcopy()
+
+def enter_invite_page():
+    display_logo()
+    st.header("Enter Invite")
+    st.write("Entering the invitation code transitions you into the full application experience.")
+
+    st.session_state.partner_code = st.text_input(
+        "Invitation code",
+        value=st.session_state.partner_code,
+        key="partner_code_input"
+    ).strip().upper()
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Back", key="enter_invite_back"):
+            nav("home" if st.session_state.logged_in else "entry")
+    with c2:
+        if st.button("Continue", key="enter_invite_continue"):
+            if not st.session_state.partner_code:
+                st.error("Please enter a code.")
+                return
+
+            is_ok, reason = validate_invite(st.session_state.partner_code)
+            if is_ok:
+                consume_invite(st.session_state.partner_code)
+                nav("reflection_start")
             else:
-                st.error("Invite code not found (or has been withdrawn).")
-        st.markdown("</div>", unsafe_allow_html=True)
+                if reason == "expired":
+                    st.error("This code has expired. Ask the sender to generate a new one.")
+                elif reason == "used":
+                    st.error("This code has already been used. Ask the sender to generate a new one.")
+                else:
+                    st.error("Code not recognized. Ask the sender to generate a new code and share it again.")
 
-    st.markdown("</div>", unsafe_allow_html=True)
-    footer()
+def reflection_start_page():
+    display_logo()
+    st.header("Begin when ready")
+    st.write("There are no right or wrong answers.")
 
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Back", key="refstart_back"):
+            nav("home" if st.session_state.logged_in else "entry")
+    with c2:
+        if st.button("Start Reflection", key="refstart_go"):
+            nav("likert")
 
-def view_consent(store: Dict[str, Any], code: str):
-    inv = store["invites"].get(code)
-    if not inv or inv.get("withdrawn"):
-        st.error("This invite is not available.")
+def likert_page():
+    display_logo()
+    st.header("Personal Calibration")
+
+    for cat_i, cat in enumerate(CATEGORIES):
+        st.subheader(cat)
+        for q_i, q in enumerate(LIKERT_QUESTIONS[cat]):
+            st.session_state.likert_responses[q] = st.slider(
+                q, 1, 5, 3, key=f"likert_{cat_i}_{q_i}"
+            )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Back", key="likert_back"):
+            nav("reflection_start")
+    with c2:
+        if st.button("Proceed", key="likert_next"):
+            nav("preview")
+
+def preview_page():
+    display_logo()
+    st.header("Preview")
+
+    st.write("You will receive:")
+    st.write("- A private Relationship Growth Index (RGI)")
+    st.write("- A wheel showing patterns")
+    st.write("- Strengths, blind spots, and growth areas")
+
+    st.session_state.use_mutual = st.checkbox(
+        "Include simulated mutual reflection?",
+        value=st.session_state.use_mutual,
+        key="mutual_checkbox"
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Back", key="preview_back"):
+            nav("likert")
+    with c2:
+        if st.button("Proceed to Assessment", key="preview_next"):
+            nav("assessment")
+
+def assessment_page():
+    display_logo()
+    st.header("Relational Assessment")
+
+    for cat_i, cat in enumerate(CATEGORIES):
+        st.subheader(cat)
+        for q_i, q in enumerate(ASSESSMENT_QUESTIONS[cat]):
+            st.session_state.assessment_responses[q] = st.slider(
+                q, 1, 5, 3, key=f"assess_{cat_i}_{q_i}"
+            )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Back", key="assess_back"):
+            nav("preview")
+    with c2:
+        if st.button("Submit", key="assess_submit"):
+            if np.random.rand() < 0.1:
+                st.error("Input blocked for toxicity. Please revise.")
+            else:
+                compute_scores()
+                generate_insights()
+                nav("dashboard")
+
+def dashboard_page():
+    display_logo()
+    st.header("Dashboard")
+
+    if not st.session_state.scores:
+        st.warning("No results found yet. Please complete the assessment.")
+        if st.button("Go to Assessment", key="dash_go_assessment"):
+            nav("assessment")
         return
 
-    st.markdown("<div class='rs-shell'>", unsafe_allow_html=True)
-    st.markdown(f"<div class='rs-title'>Thread: {code}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='rgi-big'>{st.session_state.scores['RGI']:.1f}</div>", unsafe_allow_html=True)
+    st.caption("Relationship Growth Index")
 
-    user_id = get_or_create_user_id()
-    st.divider()
-
-    st.markdown("<div class='rs-card'>", unsafe_allow_html=True)
-    st.subheader("Consent checkpoint (dual consent required)")
-    current = inv.get("consents", {})
-    you_consented = bool(current.get(user_id, False))
-    consent = st.checkbox("I consent to participate in this thread", value=you_consented)
-
-    if st.button("Save consent", type="primary"):
-        inv["consents"][user_id] = bool(consent)
-        store["invites"][code] = inv
-        _save_store(store)
-        st.success("Consent saved.")
-
-    dual = len([k for k, v in inv.get("consents", {}).items() if v]) >= 2
-    if dual:
-        st.success("Dual consent obtained. You may proceed to Reflection.")
-    else:
-        st.warning("Waiting on dual consent.")
-
-    st.divider()
-    st.subheader("Withdraw consent (clears data)")
-    if st.button("Withdraw and clear thread", type="secondary"):
-        inv["withdrawn"] = True
-        inv["reflections"] = []
-        store["invites"][code] = inv
-        _save_store(store)
-        st.success("Thread withdrawn and cleared.")
-        st.session_state.pop("active_code", None)
-
-    st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-    footer()
-
-
-def view_reflection(store: Dict[str, Any], code: str):
-    inv = store["invites"].get(code)
-    if not inv or inv.get("withdrawn"):
-        st.error("This invite is not available.")
-        return
-
-    user_id = get_or_create_user_id()
-    dual = len([k for k, v in inv.get("consents", {}).items() if v]) >= 2
-    if not dual:
-        st.warning("Dual consent is not yet obtained. Please complete Consent first.")
-        return
-
-    st.markdown("<div class='rs-shell'>", unsafe_allow_html=True)
-    st.markdown("<div class='rs-title'>Reflection</div>", unsafe_allow_html=True)
-    st.divider()
-
-    left, right = st.columns([0.62, 0.38], gap="large")
-    with left:
-        st.markdown("<div class='rs-card'>", unsafe_allow_html=True)
-        effort = st.slider("Self-rating: effort & intent to improve (1–5)", 1, 5, 3)
-
-        answers = []
-        for i, p in enumerate(PROMPTS, start=1):
-            answers.append(st.text_area(f"Prompt {i}", placeholder=p, height=110, key=f"ans_{i}"))
-
-        c1, c2, c3 = st.columns(3)
-        with c1: anxious = st.checkbox("Anxious", value=False)
-        with c2: avoidant = st.checkbox("Avoidant", value=False)
-        with c3: secure = st.checkbox("Secure", value=False)
-
-        attachments = {"anxious": anxious, "avoidant": avoidant, "secure": secure}
-
-        toxicity_ok, tox_score = enforce_toxicity_gate([*answers], threshold=0.55)
-        if not toxicity_ok:
-            st.error(f"Input blocked by the toxicity gate (score {tox_score:.2f}). Please revise.")
-        else:
-            if st.button("Submit reflection", type="primary"):
-                cat_scores = score_categories(effort, answers, attachments)
-                rgi = rgi_from_categories(cat_scores, DEFAULT_WEIGHTS)
-                inv["reflections"].append({
-                    "ts": _now_iso(),
-                    "user_id": user_id,
-                    "effort": int(effort),
-                    "answers": answers,
-                    "attachments": attachments,
-                    "categories": cat_scores,
-                    "rgi": rgi,
+    # Debug/verification: show smoothing behavior (optional)
+    with st.expander("Stability smoothing (EMA) details", expanded=False):
+        st.write(f"EMA alpha: {EMA_ALPHA}")
+        st.write(f"Max daily change: {MAX_DAILY_CHANGE} points/day (min floor {MIN_CHANGE_FLOOR})")
+        if st.session_state.raw_scores:
+            st.caption("Raw vs smoothed category scores (prototype debug view)")
+            rows = []
+            for cat in CATEGORIES:
+                raw_v = float(st.session_state.raw_scores.get(cat, np.nan))
+                sm_v = float(st.session_state.scores.get(cat, np.nan))
+                rows.append({
+                    "Category": cat,
+                    "Raw": round(raw_v, 1),
+                    "Smoothed": round(sm_v, 1),
+                    "Delta": round(sm_v - raw_v, 1),
                 })
-                store["invites"][code] = inv
-                _save_store(store)
-                st.success("Reflection saved.")
-        st.markdown("</div>", unsafe_allow_html=True)
+            st.dataframe(rows, use_container_width=True)
 
-    with right:
-        st.markdown("<div class='rs-card'>", unsafe_allow_html=True)
-        ema_alpha = st.slider("Time-weighting alpha (EMA)", 0.30, 0.80, 0.50, 0.05)
-        st.session_state["ema_alpha"] = ema_alpha
-        st.markdown("</div>", unsafe_allow_html=True)
+    # RQ Wheel (multi-color, real-time per category)
+    scores = st.session_state.scores
+    fig, ax = plt.subplots(figsize=(6.3, 6.3), subplot_kw=dict(polar=True))
+    draw_rq_wheel(ax, CATEGORIES, scores)
+    st.pyplot(fig, use_container_width=True)
 
-    st.markdown("</div>", unsafe_allow_html=True)
-    footer()
+    st.subheader("Key Insights")
+    for insight in (st.session_state.insights or []):
+        st.markdown(
+            f"""
+            <div class="insight-card">
+                <div style="font-weight:700;">{insight['category']}: {insight['type']}</div>
+                <div>{insight['description']}</div>
+                <div><i>Suggestion: {insight['suggestion']}</i></div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
+    if st.button("Withdraw and Reset", key="dash_reset"):
+        reset_state()
+        nav("entry")
 
-def view_dashboard(store: Dict[str, Any], code: str):
-    inv = store["invites"].get(code)
-    if not inv or inv.get("withdrawn"):
-        st.error("This invite is not available.")
-        return
-
-    dual = len([k for k, v in inv.get("consents", {}).items() if v]) >= 2
-    if not dual:
-        st.warning("Dual consent is not yet obtained. Please complete Consent first.")
-        return
-
-    ema_alpha = float(st.session_state.get("ema_alpha", 0.50))
-    refl = inv.get("reflections", [])
-    dashboard = compute_dashboard(refl, ema_alpha)
-
-    rgi_point = float(np.clip(dashboard["rgi_point"], 0, 100))
-    rgi_trend = float(np.clip(dashboard["rgi_trend"], 0, 100))
-
-    st.markdown("<div class='rs-shell'>", unsafe_allow_html=True)
-    st.markdown("<div class='rs-title'>Private Output</div>", unsafe_allow_html=True)
-    st.markdown("<p class='rs-sub'>RGI (Relationship Growth Index), insights, and a lightweight red-flag dashboard.</p>", unsafe_allow_html=True)
-    st.divider()
-
-    hero_left, hero_right = st.columns([0.40, 0.60], gap="large", vertical_alignment="center")
-
-    with hero_left:
-        # ✅ RELIABLE RENDER: components.html will not print HTML as text
-        components.html(ring_html(rgi_point), height=260)
-
-    with hero_right:
-        st.markdown("<div class='rs-card'>", unsafe_allow_html=True)
-        st.subheader("What this means")
-        st.write("RGI is a private, time-weighted growth signal (0–100) based on structured reflection.")
-        m1, m2 = st.columns(2)
-        m1.metric("EMA trend", f"{rgi_trend:0.1f}")
-        m2.metric("Reflections", f"{dashboard['n_reflections']}")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    st.divider()
-
-    st.markdown("<div class='rs-card'>", unsafe_allow_html=True)
-    st.subheader("Category scorecard (0–100)")
-    df = pd.DataFrame({
-        "Category": CATEGORIES,
-        "Point": [dashboard["category_point"][c] for c in CATEGORIES],
-        "Trend": [dashboard["category_trend"][c] for c in CATEGORIES],
-        "Weight": [DEFAULT_WEIGHTS[c] for c in CATEGORIES],
-    })
-    st.dataframe(df, use_container_width=True, hide_index=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown("</div>", unsafe_allow_html=True)
-    footer()
-
+    if st.button("Return to Home", key="dash_home"):
+        nav("home")
 
 # -----------------------------
 # Router
 # -----------------------------
-def main():
-    inject_branding()
-    store = _load_store()
-    code = st.session_state.get("active_code") or st.session_state.get("code") or ""
+PAGES = {
+    "entry": entry_page,
+    "create_profile": create_profile_page,
+    "log_in": log_in_page,
+    "home": home_page,
+    "create_invite": create_invite_page,
+    "enter_invite": enter_invite_page,
+    "reflection_start": reflection_start_page,
+    "likert": likert_page,
+    "preview": preview_page,
+    "assessment": assessment_page,
+    "dashboard": dashboard_page,
+}
 
-    st.sidebar.title("RelateScore™")
-    page = st.sidebar.radio("Go to", ["Home", "Consent", "Reflection", "Dashboard"], index=0)
-
-    if page == "Home":
-        view_home(store)
-        return
-
-    if not code:
-        st.sidebar.info("Join or create an invite code on Home first.")
-        view_home(store)
-        return
-
-    st.sidebar.markdown(f"**Active code:** `{code}`")
-
-    if page == "Consent":
-        view_consent(store, code)
-    elif page == "Reflection":
-        view_reflection(store, code)
-    elif page == "Dashboard":
-        view_dashboard(store, code)
-
-
-if __name__ == "__main__":
-    main()
+page = st.session_state.get("page", "entry")
+PAGES.get(page, entry_page)()
