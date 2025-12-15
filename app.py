@@ -468,6 +468,14 @@ def log_in_page():
     display_logo()
     st.header("Welcome back")
 
+    # Supporting microcopy (directly under title)
+    st.markdown(
+        "<div class='small-muted' style='margin-top:-6px;'>"
+        "<i>Your insights remain private and accessible only to you.</i>"
+        "</div>",
+        unsafe_allow_html=True
+    )
+
     c1, c2 = st.columns(2)
     with c1:
         if st.button("Back", key="login_back"):
@@ -476,6 +484,16 @@ def log_in_page():
         if st.button("Log In", key="login_go"):
             st.session_state.logged_in = True
             nav("home")
+
+    # Footer microcopy (small, muted, centered)
+    st.markdown(
+        "<div class='small-muted' style='text-align:center; margin-top:18px;'>"
+        "<i>You’re always in control of when and how you reflect.</i>"
+        "</div>",
+        unsafe_allow_html=True
+    )
+
+
 
 def home_page():
     """
