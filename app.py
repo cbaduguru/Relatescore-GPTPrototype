@@ -664,8 +664,8 @@ def create_invite_page():
         "<div class='small-muted' style='margin-top:6px;'>Waiting for your partner to accept this code…</div>",
         unsafe_allow_html=True
     )
-    with st.spinner("Checking for acceptance…"):
-        time.sleep(1.5)
+    with st.spinner("Waiting for your partner to accept…"):
+        time.sleep(3)
     # Re-run so the originating session can detect the acceptance event
     _rerun()
 
