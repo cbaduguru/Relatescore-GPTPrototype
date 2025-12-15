@@ -82,6 +82,9 @@ def nav(to_page: str):
 # -----------------------------
 INVITE_TTL_SECONDS = 60 * 30  # 30 minutes
 
+
+# How often the originating session checks for invite acceptance (seconds)
+CHECK_ACCEPTANCE_INTERVAL_SECONDS = 3
 @st.cache_resource
 def get_invite_store():
     # { CODE: {"created_at": ts, "used": bool} }
@@ -97,7 +100,7 @@ def _clean_expired_invites(store: dict):
 def register_invite(code: str) -> None:
     store = get_invite_store()
     _clean_expired_invites(store)
-    store[code] = {"created_at": time.time(), "used": False}
+    store[code] = {"created_at": time.time(), "used": False, "revoked": False}
 
 def validate_invite(code: str):
     """
@@ -112,6 +115,8 @@ def validate_invite(code: str):
     if (time.time() - meta.get("created_at", time.time())) > INVITE_TTL_SECONDS:
         store.pop(code, None)
         return False, "expired"
+    if meta.get("revoked"):
+        return False, "revoked"
     if meta.get("used"):
         return False, "used"
     return True, "ok"
@@ -121,6 +126,14 @@ def consume_invite(code: str) -> None:
     meta = store.get(code)
     if meta:
         meta["used"] = True
+
+def revoke_invite(code: str) -> None:
+    """Marks an invite as revoked so it cannot be used."""
+    store = get_invite_store()
+    _clean_expired_invites(store)
+    meta = store.get(code)
+    if meta:
+        meta["revoked"] = True
 
 def is_invite_accepted(code: str) -> bool:
     """Returns True if the invite exists and has been marked used/accepted."""
@@ -653,21 +666,86 @@ def create_invite_page():
 
     st.write("Share this invitation code privately with your partner:")
     st.code(st.session_state.invite_code)
+    st.markdown("<div class='small-muted' style='margin-top:4px;'>Tip: Select the code and copy it to share privately.</div>", unsafe_allow_html=True)
+
 
     # --- AUTO-TRANSITION: if partner accepts invite, move this originating session to Reflection automatically
     if is_invite_accepted(st.session_state.invite_code):
         nav("reflection_start")
         return
 
-    # While waiting, show a non-intrusive “Checking…” spinner and re-run periodically
+    # -----------------------------
+    # Layer 1: Waiting UX (progressive microcopy + controls + countdown)
+    # -----------------------------
+    store = get_invite_store()
+    _clean_expired_invites(store)
+    meta = store.get(st.session_state.invite_code, {})
+    created_at = float(meta.get("created_at", time.time()))
+    elapsed = max(0.0, time.time() - created_at)
+    remaining = max(0, int(INVITE_TTL_SECONDS - elapsed))
+
+    # Countdown
+    mins = remaining // 60
+    secs = remaining % 60
     st.markdown(
-        "<div class='small-muted' style='margin-top:6px;'>Waiting for your partner to accept this code…</div>",
+        f"<div class='small-muted' style='margin-top:6px;'>Code expires in {mins:d}:{secs:02d} minutes.</div>",
         unsafe_allow_html=True
     )
+
+    # Progressive microcopy (calm, consent-forward)
+    if remaining <= 0:
+        st.markdown(
+            "<div class='small-muted' style='margin-top:8px;'><b>This code expired.</b> Generate a new one to continue.</div>",
+            unsafe_allow_html=True
+        )
+    else:
+        if elapsed < 15:
+            msg = "Waiting for your partner to accept…"
+        elif elapsed < 45:
+            msg = "This can take a moment. Nothing is shared until both of you agree."
+        elif elapsed < 90:
+            msg = "If needed, you can generate a new code or return home."
+        else:
+            msg = "Still waiting. You can step away and come back anytime."
+        st.markdown(
+            f"<div class='small-muted' style='margin-top:8px;'>{msg}</div>",
+            unsafe_allow_html=True
+        )
+
+    # Controls (always available)
+    cA, cB, cC = st.columns(3)
+    with cA:
+        if st.button("Return to Home", key="wait_home"):
+            nav("home")
+            return
+    with cB:
+        if st.button("Generate New Code", key="wait_regen"):
+            # Revoke old code and issue a new one
+            revoke_invite(st.session_state.invite_code)
+            new_code = generate_invite_code()
+            st.session_state.invite_code = new_code
+            register_invite(new_code)
+            _rerun()
+    with cC:
+        if st.button("Cancel Invite", key="wait_cancel"):
+            revoke_invite(st.session_state.invite_code)
+            nav("home")
+            return
+
+    # If accepted, transition immediately
+    if is_invite_accepted(st.session_state.invite_code):
+        nav("reflection_start")
+        return
+
+    # If expired, stop polling (user can regenerate)
+    if remaining <= 0 or meta.get("revoked"):
+        return
+
+    # Spinner + periodic re-run (configurable cadence)
     with st.spinner("Waiting for your partner to accept…"):
-        time.sleep(3)
-    # Re-run so the originating session can detect the acceptance event
+        time.sleep(CHECK_ACCEPTANCE_INTERVAL_SECONDS)
     _rerun()
+
 
 
 
@@ -713,6 +791,8 @@ def enter_invite_page():
             else:
                 if reason == "expired":
                     st.error("This code has expired. Ask the sender to generate a new one.")
+                elif reason == "revoked":
+                    st.error("This code is no longer active. Ask the sender to generate a new one.")
                 elif reason == "used":
                     st.error("This code has already been used. Ask the sender to generate a new one.")
                 else:
