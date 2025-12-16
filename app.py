@@ -636,21 +636,6 @@ def home_page():
             nav("entry")
         return
 
-    # --- Auto-transition when invite is accepted in another session ---
-    if st.session_state.get("invite_code") and st.session_state.get("invite_waiting"):
-        if is_invite_used(st.session_state.invite_code):
-            st.session_state.invite_accepted = True
-            st.session_state.invite_waiting = False
-            # Clear the local invite code to prevent repeated redirects
-            st.session_state.invite_code = None
-            nav("reflection_start")
-            return
-        else:
-            st.info("Waiting for your partner to accept the invitation…")
-            # Lightweight polling for Streamlit Cloud prototype
-            time.sleep(2)
-            _rerun()
-
     if st.button("Create Invite", key="home_create_invite"):
         code = generate_invite_code()
         st.session_state.invite_code = code
